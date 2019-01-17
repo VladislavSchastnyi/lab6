@@ -1,0 +1,172 @@
+
+#include "stdafx.h"
+#include <iostream>
+#include <thread>
+#include <array>
+#include <ctime>
+#include <boost\log\trivial.hpp>
+#include "picosha2.h"
+
+#include <boost\log\expressions.hpp>
+
+#include <boost\log\utility\setup\console.hpp>
+#include <boost\log\utility\setup\file.hpp>
+#include <boost\log\utility\setup\common_attributes.hpp>
+#include <boost\log\support\date_time.hpp>
+
+using namespace std;
+
+namespace logging = boost::log;
+namespace keywords = boost::log::keywords;
+
+/*Размер массива потоков*/
+#define threads_array_size 100
+
+/*Массив идентификаторов потоков*/
+std::array <std::thread::id, threads_array_size> threads_array_id;
+
+/*Размер массива случайных входных данных*/
+#define data_array_size 256
+
+/*Функции скопированы из файла picosha2.h*/
+template <typename InIter>
+void output_hex(InIter first, InIter last, std::ostream& os) 
+{
+	os.setf(std::ios::hex, std::ios::basefield);
+	while (first != last) 
+	{
+		os.width(2);
+		os.fill('0');
+		os << static_cast<unsigned int>(*first);
+		++first;
+	}
+	os.setf(std::ios::dec, std::ios::basefield);
+}
+
+template <typename InIter>
+void bytes_to_hex_string(InIter first, InIter last, std::string& hex_str) 
+{
+	std::ostringstream oss;
+	output_hex(first, last, oss);
+	hex_str.assign(oss.str());
+}
+
+template <typename InContainer>
+void bytes_to_hex_string(const InContainer& bytes, std::string& hex_str) 
+{
+	bytes_to_hex_string(bytes.begin(), bytes.end(), hex_str);
+}
+
+/*Поток для вычисления SHA. В качестве параметра передается номер потока в массиве идентификаторов потоков.*/
+void calcSHA(int thread_number)
+{
+	//Массив случайных входных данных
+	std::array <unsigned char, data_array_size> data_array;
+
+	//Инициализация встроенного генератора псевдо-случайных чисел от текущего времени 
+	//с прибавкой номера потока, чтобы были разные последовательности псевдо-случайных чисел 
+	std::srand((unsigned int)std::time(nullptr) + thread_number);
+
+	//Цикл поиска
+	while (true) 
+	{
+		//Заполнение массива случайными числами
+		for (int i = 0; i < data_array_size; i++) 
+		{
+			data_array[i] = std::rand();
+		}
+
+		//Вычисление значения хеш-функции
+		const std::string hash = picosha2::hash256_hex_string(data_array);
+
+		//Строка для записи случайных входных данных в лог
+		string data_str;
+		bytes_to_hex_string(data_array, data_str);  //преобразование массива случайных чисел в строку 16-тиричный вид
+
+		//Запись в лог на уровне trace
+		BOOST_LOG_TRIVIAL(trace) << "[" << threads_array_id[thread_number] << "] data: " << data_str << " hash: " << hash << std::endl;
+
+		//Проверка четырех последних нулей
+		if ((hash[hash.size() - 1] == '0') &&
+			(hash[hash.size() - 2] == '0') &&
+			(hash[hash.size() - 3] == '0') &&
+			(hash[hash.size() - 4] == '0')) 
+		{
+			//Запись в лог на уровне info
+			BOOST_LOG_TRIVIAL(info) << " hash: " << hash << std::endl;
+		}
+	}
+
+	return;
+}
+
+int main(int argc, char*argv[]) //Первый входной параметр задает число потоков
+{
+	//Число одновременно выполняемых потоков
+	unsigned int m = std::thread::hardware_concurrency();
+	//Символ для ожидания завершения программы
+	unsigned char s;
+	//Массив потоков
+	std::thread threads[threads_array_size];
+
+	//Проверка количества входных параметров
+	if (argc > 2) 
+	{
+		cout << "Invalid input params" << endl;
+		return 1;
+	}
+
+	//Обработка первого входного параметра, если он есть
+	if ((argc == 2)) 
+	{
+		m = atoi(argv[1]);
+		//Если первый входной параметр (не число или 0) или 
+		//(он больше, чем максимальное число одновременно выполняемых потоков), то задаем максимальное значение
+		if ((m == 0) || (m > std::thread::hardware_concurrency())) {
+			m = std::thread::hardware_concurrency();
+		}
+	}
+
+	//Проверка достаточности массива потоков
+	if (m > threads_array_size) 
+	{
+		m = threads_array_size;
+	}
+
+	cout << "Thread count " << m << endl;
+
+	//Настройка параметров логгирования в файл
+	logging::add_file_log
+	(
+		//Шаблон для имени файлов с логами
+		keywords::file_name = "log_%N.log",
+		//Настройка размера для ротации файлов с логами
+		keywords::rotation_size = 10 * 1024
+	);
+
+	//Настройка параметров логгирования на консоль
+	logging::add_console_log(std::cout);
+
+	//Установка максимального уровня логгирования
+	logging::core::get()->set_filter
+	(
+		logging::trivial::severity >= boost::log::trivial::info
+		//logging::trivial::severity >= boost::log::trivial::trace
+	);
+
+	//Запуск потоков
+	for (unsigned int i = 0; i < m; i++) 
+	{
+		//Старт потока i
+		threads[i] = std::thread(calcSHA, i);
+		//Сохранение идентификатора i-го потока в массиве идентификаторов потоков
+		threads_array_id[i] = threads[i].get_id();
+		//Отсоединение от потока и его самостоятельная работа
+		threads[i].detach();
+	}
+
+	//Ожидание завершения работы программы
+	cout << "Press any key " << endl;
+	cin >> s;
+	return 0;
+}
